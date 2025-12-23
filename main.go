@@ -127,26 +127,62 @@ func main() {
 	// Send command
 	fmt.Fprintf(stdin, "%s\n", *command)
 
-	// Read output until we see the prompt again
+	// Read output with timeout
 	var output strings.Builder
+	readCh := make(chan string)
+	errCh := make(chan error)
+
+	go func() {
+		for {
+			n, err := stdout.Read(buf)
+			if err != nil {
+				errCh <- err
+				return
+			}
+			readCh <- string(buf[:n])
+		}
+	}()
+
+	timeout := time.After(10 * time.Second)
+	lastRead := time.Now()
+
+readLoop:
 	for {
-		n, err := stdout.Read(buf)
-		if err != nil {
-			break
-		}
-		chunk := string(buf[:n])
-		output.WriteString(chunk)
+		select {
+		case chunk := <-readCh:
+			lastRead = time.Now()
+			output.WriteString(chunk)
 
-		// Handle pagination - send space to continue
-		if strings.Contains(chunk, "More") || strings.Contains(chunk, "more") {
-			fmt.Fprintf(stdin, " ")
-			continue
-		}
+			// Handle pagination - send space to continue
+			if strings.Contains(chunk, "More") || strings.Contains(chunk, "more") {
+				fmt.Fprintf(stdin, " ")
+				continue
+			}
 
-		// Check if we've returned to prompt
-		if strings.HasSuffix(strings.TrimSpace(chunk), "#") {
-			time.Sleep(100 * time.Millisecond)
-			break
+			// Check if we've returned to prompt (line ending with #)
+			if strings.Contains(chunk, "#") {
+				// Small delay to catch any remaining output
+				time.Sleep(200 * time.Millisecond)
+				select {
+				case extra := <-readCh:
+					output.WriteString(extra)
+				default:
+				}
+				break readLoop
+			}
+
+		case <-errCh:
+			break readLoop
+
+		case <-timeout:
+			break readLoop
+
+		default:
+			// If no data for 500ms after last read, assume done
+			if time.Since(lastRead) > 500*time.Millisecond && output.Len() > 0 {
+				break readLoop
+			}
+			time.Sleep(50 * time.Millisecond)
 		}
 	}
 
