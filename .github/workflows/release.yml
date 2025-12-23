@@ -1,0 +1,32 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+
+      - name: Build Mac ARM
+        run: GOOS=darwin GOARCH=arm64 go build -o zyxel-darwin-arm64 .
+
+      - name: Build Windows x64
+        run: GOOS=windows GOARCH=amd64 go build -o zyxel-windows-amd64.exe .
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            zyxel-darwin-arm64
+            zyxel-windows-amd64.exe
