@@ -3,7 +3,6 @@ package main
 import (
 	"flag"
 	"fmt"
-	"log"
 	"os"
 	"strings"
 	"time"
@@ -11,6 +10,11 @@ import (
 	"github.com/joho/godotenv"
 	"golang.org/x/crypto/ssh"
 )
+
+func fatal(format string, args ...interface{}) {
+	fmt.Fprintf(os.Stderr, "Error: "+format+"\n", args...)
+	os.Exit(1)
+}
 
 func main() {
 	command := flag.String("c", "", "Zyxel command to execute")
@@ -26,10 +30,16 @@ func main() {
 		fmt.Println("  zyxel -c 'show mac address-table'")
 		fmt.Println("  zyxel -c 'show vlan'")
 		fmt.Println("  zyxel -c '?'                        # show available commands")
+		fmt.Println()
+		fmt.Println("Environment variables:")
+		fmt.Println("  ZYXEL_HOST      Switch IP address (required)")
+		fmt.Println("  ZYXEL_USER      SSH username (required)")
+		fmt.Println("  ZYXEL_PASSWORD  SSH password (required)")
+		fmt.Println("  ZYXEL_PORT      SSH port (default: 22)")
 		os.Exit(1)
 	}
 
-	// Load .env if present, but don't fail if missing
+	// Load .env if present
 	_ = godotenv.Load()
 
 	host := os.Getenv("ZYXEL_HOST")
@@ -37,8 +47,18 @@ func main() {
 	password := os.Getenv("ZYXEL_PASSWORD")
 	port := os.Getenv("ZYXEL_PORT")
 
-	if host == "" || user == "" || password == "" {
-		log.Fatal("ZYXEL_HOST, ZYXEL_USER, and ZYXEL_PASSWORD must be set in .env")
+	var missing []string
+	if host == "" {
+		missing = append(missing, "ZYXEL_HOST")
+	}
+	if user == "" {
+		missing = append(missing, "ZYXEL_USER")
+	}
+	if password == "" {
+		missing = append(missing, "ZYXEL_PASSWORD")
+	}
+	if len(missing) > 0 {
+		fatal("Missing required environment variables: %s", strings.Join(missing, ", "))
 	}
 
 	if port == "" {
@@ -74,19 +94,19 @@ func main() {
 	}
 
 	address := fmt.Sprintf("%s:%s", host, port)
+
 	client, err := ssh.Dial("tcp", address, config)
 	if err != nil {
-		log.Fatalf("Failed to connect: %v", err)
+		fatal("Failed to connect to %s: %v", address, err)
 	}
 	defer client.Close()
 
 	session, err := client.NewSession()
 	if err != nil {
-		log.Fatalf("Failed to create session: %v", err)
+		fatal("Failed to create SSH session: %v", err)
 	}
 	defer session.Close()
 
-	// Set up terminal modes for interactive session
 	modes := ssh.TerminalModes{
 		ssh.ECHO:          0,
 		ssh.TTY_OP_ISPEED: 14400,
@@ -94,21 +114,21 @@ func main() {
 	}
 
 	if err := session.RequestPty("xterm", 80, 200, modes); err != nil {
-		log.Fatalf("Failed to request PTY: %v", err)
+		fatal("Failed to request PTY: %v", err)
 	}
 
 	stdin, err := session.StdinPipe()
 	if err != nil {
-		log.Fatalf("Failed to get stdin: %v", err)
+		fatal("Failed to get stdin pipe: %v", err)
 	}
 
 	stdout, err := session.StdoutPipe()
 	if err != nil {
-		log.Fatalf("Failed to get stdout: %v", err)
+		fatal("Failed to get stdout pipe: %v", err)
 	}
 
 	if err := session.Shell(); err != nil {
-		log.Fatalf("Failed to start shell: %v", err)
+		fatal("Failed to start shell: %v", err)
 	}
 
 	buf := make([]byte, 4096)
@@ -116,7 +136,6 @@ func main() {
 	errCh := make(chan error, 1)
 	done := make(chan struct{})
 
-	// Start reader goroutine
 	go func() {
 		for {
 			select {
@@ -136,7 +155,7 @@ func main() {
 		}
 	}()
 
-	// Wait for initial prompt with timeout
+	// Wait for initial prompt
 	promptTimeout := time.After(5 * time.Second)
 waitPrompt:
 	for {
@@ -147,17 +166,17 @@ waitPrompt:
 			}
 		case <-promptTimeout:
 			close(done)
-			log.Fatal("Timeout waiting for prompt")
+			fatal("Timeout waiting for switch prompt")
 		case <-errCh:
 			close(done)
-			log.Fatal("Connection error")
+			fatal("Connection closed unexpectedly")
 		}
 	}
 
 	// Send command
 	fmt.Fprintf(stdin, "%s\n", *command)
 
-	// Read output with timeout
+	// Read output
 	var output strings.Builder
 	timeout := time.After(30 * time.Second)
 	lastRead := time.Now()
@@ -170,18 +189,15 @@ readLoop:
 			lastRead = time.Now()
 			output.WriteString(chunk)
 
-			// Handle pagination - send space to continue
 			if strings.Contains(strings.ToLower(chunk), "more") {
 				fmt.Fprintf(stdin, " ")
 				continue
 			}
 
-			// Mark that we've received actual content (not just command echo)
 			if strings.Contains(chunk, "\n") {
 				seenContent = true
 			}
 
-			// Check if we've returned to prompt after seeing content
 			if seenContent {
 				trimmed := strings.TrimRight(output.String(), " \r\n")
 				if strings.HasSuffix(trimmed, "#") {
@@ -196,7 +212,6 @@ readLoop:
 			break readLoop
 
 		default:
-			// If no data for 500ms after last read, assume done
 			if time.Since(lastRead) > 500*time.Millisecond && output.Len() > 0 {
 				break readLoop
 			}
@@ -206,16 +221,14 @@ readLoop:
 
 	close(done)
 
-	// Clean up output
+	// Clean and print output
 	result := output.String()
 	lines := strings.Split(result, "\n")
 
-	// Skip first line (echo of command) and last line (prompt)
 	if len(lines) > 2 {
 		lines = lines[1 : len(lines)-1]
 	}
 
-	// Print cleaned output
 	for _, line := range lines {
 		line = strings.TrimRight(line, "\r")
 		if line != "" {
