@@ -129,7 +129,6 @@ func main() {
 
 	// Read output until we see the prompt again
 	var output strings.Builder
-	promptCount := 0
 	for {
 		n, err := stdout.Read(buf)
 		if err != nil {
@@ -138,13 +137,16 @@ func main() {
 		chunk := string(buf[:n])
 		output.WriteString(chunk)
 
+		// Handle pagination - send space to continue
+		if strings.Contains(chunk, "More") || strings.Contains(chunk, "more") {
+			fmt.Fprintf(stdin, " ")
+			continue
+		}
+
 		// Check if we've returned to prompt
-		if strings.Contains(chunk, "#") {
-			promptCount++
-			if promptCount >= 1 {
-				time.Sleep(100 * time.Millisecond)
-				break
-			}
+		if strings.HasSuffix(strings.TrimSpace(chunk), "#") {
+			time.Sleep(100 * time.Millisecond)
+			break
 		}
 	}
 
