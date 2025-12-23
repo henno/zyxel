@@ -112,15 +112,46 @@ func main() {
 		log.Fatalf("Failed to start shell: %v", err)
 	}
 
-	// Wait for prompt
 	buf := make([]byte, 4096)
-	for {
-		n, err := stdout.Read(buf)
-		if err != nil {
-			break
+	readCh := make(chan string, 100)
+	errCh := make(chan error, 1)
+	done := make(chan struct{})
+
+	// Start reader goroutine
+	go func() {
+		for {
+			select {
+			case <-done:
+				return
+			default:
+				n, err := stdout.Read(buf)
+				if err != nil {
+					select {
+					case errCh <- err:
+					default:
+					}
+					return
+				}
+				readCh <- string(buf[:n])
+			}
 		}
-		if strings.Contains(string(buf[:n]), "#") {
-			break
+	}()
+
+	// Wait for initial prompt with timeout
+	promptTimeout := time.After(5 * time.Second)
+waitPrompt:
+	for {
+		select {
+		case chunk := <-readCh:
+			if strings.Contains(chunk, "#") {
+				break waitPrompt
+			}
+		case <-promptTimeout:
+			close(done)
+			log.Fatal("Timeout waiting for prompt")
+		case <-errCh:
+			close(done)
+			log.Fatal("Connection error")
 		}
 	}
 
@@ -129,28 +160,9 @@ func main() {
 
 	// Read output with timeout
 	var output strings.Builder
-	readCh := make(chan string)
-	errCh := make(chan error)
-
-	go func() {
-		for {
-			n, err := stdout.Read(buf)
-			if err != nil {
-				errCh <- err
-				return
-			}
-			readCh <- string(buf[:n])
-		}
-	}()
-
-	timeout := time.After(10 * time.Second)
+	timeout := time.After(30 * time.Second)
 	lastRead := time.Now()
 	seenContent := false
-	promptPattern := func(s string) bool {
-		// Match prompt like "C0-GS1920# " at end of output
-		trimmed := strings.TrimRight(s, " \r\n")
-		return strings.HasSuffix(trimmed, "#")
-	}
 
 readLoop:
 	for {
@@ -171,9 +183,11 @@ readLoop:
 			}
 
 			// Check if we've returned to prompt after seeing content
-			if seenContent && promptPattern(output.String()) {
-				time.Sleep(100 * time.Millisecond)
-				break readLoop
+			if seenContent {
+				trimmed := strings.TrimRight(output.String(), " \r\n")
+				if strings.HasSuffix(trimmed, "#") {
+					break readLoop
+				}
 			}
 
 		case <-errCh:
@@ -183,13 +197,15 @@ readLoop:
 			break readLoop
 
 		default:
-			// If no data for 1s after last read, assume done
-			if time.Since(lastRead) > 1*time.Second && output.Len() > 0 {
+			// If no data for 500ms after last read, assume done
+			if time.Since(lastRead) > 500*time.Millisecond && output.Len() > 0 {
 				break readLoop
 			}
-			time.Sleep(50 * time.Millisecond)
+			time.Sleep(10 * time.Millisecond)
 		}
 	}
+
+	close(done)
 
 	// Clean up output
 	result := output.String()
@@ -202,7 +218,6 @@ readLoop:
 
 	// Print cleaned output
 	for _, line := range lines {
-		// Remove carriage returns and trim
 		line = strings.TrimRight(line, "\r")
 		if line != "" {
 			fmt.Println(line)
