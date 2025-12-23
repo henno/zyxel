@@ -145,6 +145,12 @@ func main() {
 
 	timeout := time.After(10 * time.Second)
 	lastRead := time.Now()
+	seenContent := false
+	promptPattern := func(s string) bool {
+		// Match prompt like "C0-GS1920# " at end of output
+		trimmed := strings.TrimRight(s, " \r\n")
+		return strings.HasSuffix(trimmed, "#")
+	}
 
 readLoop:
 	for {
@@ -154,20 +160,19 @@ readLoop:
 			output.WriteString(chunk)
 
 			// Handle pagination - send space to continue
-			if strings.Contains(chunk, "More") || strings.Contains(chunk, "more") {
+			if strings.Contains(strings.ToLower(chunk), "more") {
 				fmt.Fprintf(stdin, " ")
 				continue
 			}
 
-			// Check if we've returned to prompt (line ending with #)
-			if strings.Contains(chunk, "#") {
-				// Small delay to catch any remaining output
-				time.Sleep(200 * time.Millisecond)
-				select {
-				case extra := <-readCh:
-					output.WriteString(extra)
-				default:
-				}
+			// Mark that we've received actual content (not just command echo)
+			if strings.Contains(chunk, "\n") {
+				seenContent = true
+			}
+
+			// Check if we've returned to prompt after seeing content
+			if seenContent && promptPattern(output.String()) {
+				time.Sleep(100 * time.Millisecond)
 				break readLoop
 			}
 
@@ -178,8 +183,8 @@ readLoop:
 			break readLoop
 
 		default:
-			// If no data for 500ms after last read, assume done
-			if time.Since(lastRead) > 500*time.Millisecond && output.Len() > 0 {
+			// If no data for 1s after last read, assume done
+			if time.Since(lastRead) > 1*time.Second && output.Len() > 0 {
 				break readLoop
 			}
 			time.Sleep(50 * time.Millisecond)
