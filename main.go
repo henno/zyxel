@@ -29,9 +29,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := godotenv.Load(); err != nil {
-		log.Fatal("Error loading .env file")
-	}
+	// Load .env if present, but don't fail if missing
+	_ = godotenv.Load()
 
 	host := os.Getenv("ZYXEL_HOST")
 	user := os.Getenv("ZYXEL_USER")
